@@ -2,139 +2,70 @@
 
 namespace Roots\Sage\Template;
 
+use Illuminate\Container\Container;
 use Illuminate\Contracts\Container\Container as ContainerContract;
-use Illuminate\Contracts\View\Factory as FactoryContract;
-use Illuminate\View\Engines\CompilerEngine;
-use Illuminate\View\Engines\EngineInterface;
-use Illuminate\View\ViewFinderInterface;
+use Illuminate\Events\Dispatcher;
+use Illuminate\Filesystem\Filesystem;
+use Illuminate\View\ViewServiceProvider;
 
 /**
  * Class BladeProvider
- *
- * @method bool exists(string $view) Determine if a given view exists.
- * @method mixed share(array|string $key, mixed $value = null)
- * @method array creator(array|string $views, \Closure|string $callback)
- * @method array composer(array|string $views, \Closure|string $callback)
- * @method \Illuminate\View\View file(string $file, array $data = [], array $mergeData = [])
- * @method \Illuminate\View\View make(string $file, array $data = [], array $mergeData = [])
- * @method \Illuminate\View\View addNamespace(string $namespace, string|array $hints)
- * @method \Illuminate\View\View replaceNamespace(string $namespace, string|array $hints)
- * @method \Illuminate\Contracts\Container\Container getContainer()
  */
-class Blade
+class BladeProvider extends ViewServiceProvider
 {
-    /** @var Factory */
-    protected $env;
-
-    public function __construct(FactoryContract $env)
+    /**
+     * @param ContainerContract $container
+     * @param array             $config
+     * @SuppressWarnings(PHPMD.StaticAccess)
+     */
+    public function __construct(ContainerContract $container = null, $config = [])
     {
-        $this->env = $env;
+        /** @noinspection PhpParamsInspection */
+        parent::__construct($container ?: Container::getInstance());
+
+        $this->app->bindIf('config', function () use ($config) {
+            return $config;
+        }, true);
     }
 
     /**
-     * Get the compiler
-     *
-     * @return \Illuminate\View\Compilers\BladeCompiler
+     * Bind required instances for the service provider.
      */
-    public function compiler()
+    public function register()
     {
-        static $engineResolver;
-        if (!$engineResolver) {
-            $engineResolver = $this->getContainer()->make('view.engine.resolver');
-        }
-        return $engineResolver->resolve('blade')->getCompiler();
+        $this->registerFilesystem();
+        $this->registerEvents();
+        parent::register();
     }
 
     /**
-     * @param string $view
-     * @param array  $data
-     * @param array  $mergeData
-     * @return string
+     * Register Filesystem
      */
-    public function render($view, $data = [], $mergeData = [])
+    public function registerFilesystem()
     {
-        /** @var \Illuminate\Contracts\Filesystem\Filesystem $filesystem */
-        $filesystem = $this->getContainer()['files'];
-        return $this->{$filesystem->exists($view) ? 'file' : 'make'}($view, $data, $mergeData)->render();
+        $this->app->bindIf('files', Filesystem::class, true);
     }
 
     /**
-     * @param string $file
-     * @param array  $data
-     * @param array  $mergeData
-     * @return string
+     * Register the events dispatcher
      */
-    public function compiledPath($file, $data = [], $mergeData = [])
+    public function registerEvents()
     {
-        $rendered = $this->file($file, $data, $mergeData);
-        /** @var EngineInterface $engine */
-        $engine = $rendered->getEngine();
-
-        if (!($engine instanceof CompilerEngine)) {
-            // Using PhpEngine, so just return the file
-            return $file;
-        }
-
-        $compiler = $engine->getCompiler();
-        $compiledPath = $compiler->getCompiledPath($rendered->getPath());
-        if ($compiler->isExpired($compiledPath)) {
-            $compiler->compile($file);
-        }
-        return $compiledPath;
+        $this->app->bindIf('events', Dispatcher::class, true);
     }
 
     /**
-     * @param string $file
-     * @return string
+     * Register the view finder implementation.
      */
-    public function normalizeViewPath($file)
+    public function registerViewFinder()
     {
-        // Convert `\` to `/`
-        $view = str_replace('\\', '/', $file);
-
-        // Add namespace to path if necessary
-        $view = $this->applyNamespaceToPath($view);
-
-        // Remove unnecessary parts of the path
-        $view = str_replace(array_merge(
-            $this->getContainer()['config']['view.paths'],
-            ['.blade.php', '.php', '.css']
-        ), '', $view);
-
-        // Remove superfluous and leading slashes
-        return ltrim(preg_replace('%//+%', '/', $view), '/');
-    }
-
-    /**
-     * Convert path to view namespace
-     *
-     * @param string $path
-     * @return string
-     */
-    public function applyNamespaceToPath($path)
-    {
-        /** @var ViewFinderInterface $finder */
-        $finder = $this->getContainer()['view.finder'];
-        if (!method_exists($finder, 'getHints')) {
-            return $path;
-        }
-        $delimiter = $finder::HINT_PATH_DELIMITER;
-        $hints = $finder->getHints();
-        $view = array_reduce(array_keys($hints), function ($view, $namespace) use ($delimiter, $hints) {
-            return str_replace($hints[$namespace], $namespace.$delimiter, $view);
-        }, $path);
-        return preg_replace("%{$delimiter}[\\/]*%", $delimiter, $view);
-    }
-
-    /**
-     * Pass any method to the view Factory instance.
-     *
-     * @param  string $method
-     * @param  array  $params
-     * @return mixed
-     */
-    public function __call($method, $params)
-    {
-        return call_user_func_array([$this->env, $method], $params);
+        $this->app->bindIf('view.finder', function ($app) {
+            $config = $this->app['config'];
+            $paths = $config['view.paths'];
+            $namespaces = $config['view.namespaces'];
+            $finder = new FileViewFinder($app['files'], $paths);
+            array_map([$finder, 'addNamespace'], array_keys($namespaces), $namespaces);
+            return $finder;
+        }, true);
     }
 }
